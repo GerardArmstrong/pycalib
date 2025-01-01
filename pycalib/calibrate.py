@@ -1,33 +1,19 @@
-"""
-The plan:
-
-- Calibrator is a superclass that is designed to handle calibration of images at TUSQ:
-    - Perform an intrinsic calibration using our rig
-    - This usually has a set number of images (360)
-    - The first one should be discarded as we get an extra frame at start
-    - Perform extrinsic calibrations too
-    - Save the camera model, distortion coefficients etc
-"""
-
 from hscimproc import FrameGenerator
 import cv2 as cv
 import numpy as np
-
-frames = None
-
-frame_generator = FrameGenerator()
+from sys import stdout
+from scipy.spatial.transform import Rotation
 
 class TusqCharucoBoard(cv.aruco.CharucoBoard):
 
     def __init__(self):
 
-        dict = cv.aruco.getPredefinedDictionary(cv.aruco.DICT_4X4_50)
+        _dict = cv.aruco.getPredefinedDictionary(cv.aruco.DICT_4X4_50)
         
-        super().__init__((10,10),0.01915,0.01915*0.6,dict)
+        super().__init__((10,10),0.01915,0.01915*0.6,_dict)
 
 class TusqCharucoDetector(cv.aruco.CharucoDetector):
     
-
     def __init__(self):
         ch_params = cv.aruco.CharucoParameters()
         d_params = cv.aruco.DetectorParameters()
@@ -36,164 +22,318 @@ class TusqCharucoDetector(cv.aruco.CharucoDetector):
         d_params.useAruco3Detection = True
         d_params.cornerRefinementMethod = cv.aruco.CORNER_REFINE_SUBPIX
 
-        super().__init__(TusqCharucoBoard(),charucoParams=ch_params,detectorParams=d_params,refineParams=r_params)
+        self.board = TusqCharucoBoard()
 
-class CameraCalibrator:
+        super().__init__(self.board,charucoParams=ch_params,detectorParams=d_params,refineParams=r_params)
 
-    def __init__(self,im_shape=(1024,1024)):
-        # frame_generator = FrameGenerator()
-        self.im_shape = im_shape
+class Camera:
 
-    def detect_charuco_corners(self,include=None,exclude=None,show_img=False):
+    class PropertiesContainer(object):
+        def __repr__(self):
+            return '\n'.join({f'{k}: {v}' for k,v in self.__dict__.items()})
+
+    def __init__(self,frame_generator,name=None,cameraMatrix=None,px_size=None):
         
-        global frames
+        self.frames = frame_generator
+        self.aruco_frames = {}
+        self.intrinsics = self.PropertiesContainer()
+        self.extrinsics = self.PropertiesContainer()
+        self.is_calibrated_intrinsic = False
+        self.is_calibrated_extrinsic = False
+        self.intrinsics.cameraMatrix = cameraMatrix
+        self.name = name if type(name) is str else "Unknown Camera"
+        self.px_size = px_size
+
+    def detect_charuco_corners(self,hflip=False,show_img=False):
 
         detector = TusqCharucoDetector()
+        self.detector = detector
 
-        all_pts = []
-        all_pts_world = []
-        all_ids = []
-        used = []
+        self.aruco_frames = {}
 
-        for i, frame in enumerate(frames):
+        for i, frame in enumerate(self.frames):
 
-            if exclude is not None and i in exclude: continue
-            if include is not None and not i in include: continue
+            # if exclude is not None and i in exclude: continue
+            # if include is not None and not i in include: continue
 
-            print(f"Running AruCo detection - frame {i}")
+            stdout.write(f"Running AruCo detection on {self.name} - frame {i}\r")
 
-            framergb = cv.cvtColor(frame,cv.COLOR_GRAY2BGR)
+            frame = frame.copy()
+            framergb = cv.cvtColor(frame,cv.COLOR_GRAY2BGR).copy()
+            # detector = TusqCharucoDetector()
 
             ch_cnrs, ch_ids, marker_cnrs, marker_ids = detector.detectBoard(frame)
 
-            if ch_cnrs is not None and len(ch_cnrs) >= 4:
-                
-                if show_img:
-                    cv.aruco.drawDetectedCornersCharuco(framergb,ch_cnrs,ch_ids,(0,0,255))
-                    cv.aruco.drawDetectedMarkers(framergb,marker_cnrs,marker_ids,(0,255,0))
-                    cv.imshow('',framergb)
-                    key = cv.waitKey(0)
-                    if key == ord('q'): break
-
+            if ch_cnrs is None:
+                ch_cnr_points_world = None
+            else:
                 ch_cnr_points_world = detector.getBoard().getChessboardCorners()[ch_ids]
 
-                all_pts.append(ch_cnrs)
-                all_pts_world.append(ch_cnr_points_world)
-                all_ids.append(ch_ids)
-                used.append(i)
+                if show_img:
+                    cv.aruco.drawDetectedCornersCharuco(framergb,ch_cnrs,ch_ids,cornerColor=(0,0,255))
+                    cv.putText(framergb,f"Frame {i}",(10,30),cv.FONT_HERSHEY_SIMPLEX,1.,(0,255,0))
+                    cv.imshow(f'Detected corners for {self.name}',framergb)
+                    cv.waitKey()
 
-        if len(all_pts) < 10:
+            self.add_detected_charuco_frame(i,ch_cnrs,ch_cnr_points_world,ch_ids)
+
+        cv.destroyAllWindows()
+        stdout.write('\n')
+
+        if len(self.stack_charuco_frames()[0]) < 10:
             raise ValueError("Less than 10 images detected any features")
         
-        return all_pts,all_pts_world,all_ids,used
+    def calibrate_intrinsic(self,include=None,exclude=None,err_threshold=3,flags=0,*args,**kwargs):
 
-    def _calibrate_intrinsic(self,frames,include=None,exclude=None,show_img=False,err_threshold=3,*args,**kwargs):
-        
-        all_pts,all_pts_world,all_ids,used = self.detect_charuco_corners(frames,include,exclude,show_img)
+        assert len(self.aruco_frames.values()) > 10
 
-        retval, cameraMatrix, distCoeffs, rvecs, tvecs, stdDeviationsIntrinsics, stdDeviationsExtrinsics, perViewErrors = cv.calibrateCameraExtended(all_pts_world,all_pts,self.im_shape,None,None)
+        all_pts, all_pts_world, _ = self.stack_charuco_frames(include=include,exclude=exclude)
 
-        self.retval = retval
-        self.cameraMatrix = cameraMatrix
-        self.distCoeffs = distCoeffs
-        self.rvecs = rvecs
-        self.tvecs = tvecs
-        self.stdDeviationsIntrinsics = stdDeviationsExtrinsics
-        self.stdDeviationsExtrinsics = stdDeviationsExtrinsics
-        self.perViewErrors = perViewErrors
-        self.used = used
+        distCoeffs = [0,0,0,0,0]
 
-        bad_frames = [(used[j],err) for j, err in enumerate(perViewErrors) if err > err_threshold]
+        retval, cameraMatrix, distCoeffs, rvecs, tvecs, stdDeviationsIntrinsics, stdDeviationsExtrinsics, perViewErrors = cv.calibrateCameraExtended(
+            all_pts_world,
+            all_pts,
+            self.frames.im_shape,
+            self.intrinsics.cameraMatrix,
+            None,
+            flags=flags
+            )
 
-        if bad_frames:
+        self.intrinsics.cameraMatrix = cameraMatrix
+        self.intrinsics.distCoeffs = distCoeffs
+        self.intrinsics.rvecs = rvecs
+        self.intrinsics.retval = retval
+        self.intrinsics.tvecs = tvecs
+        self.intrinsics.stdDeviationsIntrinsics = stdDeviationsIntrinsics
+        self.intrinsics.stdDeviationsExtrinsics = stdDeviationsExtrinsics
+        self.intrinsics.perViewErrors = perViewErrors
+
+        bad_frames = self.map_to_frame_number(perViewErrors)
+        bad_frames = {k:v for k,v in bad_frames.items() if v > err_threshold}
+
+        if len(bad_frames.values()) > 0:
             print()
             print("Consider adding the following frames to the exclude list (error shown alongside): ")
             print()
-            for frame_num, err in bad_frames:
+            for frame_num, err in bad_frames.items():
                 print(f"{frame_num}: {err[0]:.2f}")
             print()
 
-        return retval, cameraMatrix, distCoeffs, rvecs, tvecs, stdDeviationsIntrinsics, stdDeviationsExtrinsics, perViewErrors, used        
+        if self.intrinsics.retval < err_threshold:
+            self.is_calibrated_intrinsic = True
 
-    def calibrate_from_mraw(self,mraw,include=None,exclude=None,hflip=False,*args,**kwargs):
-        
-        frames = frame_generator.raw_frame_generator_int8(mraw,hflip=hflip,*args,**kwargs)
+    def map_to_frame_number(self,l):
 
-        return self._calibrate_intrinsic(frames,include,exclude)
+        ret = {}
+        counter = 0
+        for item in l:
+            if self.aruco_frames[counter][0] is not None:
+                ret[counter] = item
+            counter +=1
+        return ret
 
-    def calibrate_from_image_files(self,glob_pattern,include=None,exclude=None,hflip=False,*args,**kwargs):
+    def calibrate_extrinsic(self, camera2,n_best_images=1,R=None,T=None,flags=0):
 
-        frames = frame_generator.standard_format_frame_generator(glob_pattern,hflip=hflip,*args,**kwargs)
-        print(id(frames))
-        return self._calibrate_intrinsic(frames,include,exclude)
+        camera1 = self
 
-    def calibrate_extrinsic(self,frames_c1,frames_c2,cameraMatrix1,include=None,exclude=None):
+        assert camera1.is_calibrated_intrinsic
+        assert camera2.is_calibrated_intrinsic
 
-        global frames
-        cam_1_im_pts = []
-        cam_2_im_pts = []
+        camera1_cnrs, camera2_cnrs, world_cnrs = camera1.match_detected_points(camera2)
 
-        frames_gen = FrameGenerator()
-        frames = frames_gen.raw_frame_generator_int8(frames_c1,hflip=True)
+        # only keep the biggest few
+        sindx = [len(x) for x in camera1_cnrs]
+        sindx = np.argsort(sindx)[-1:-(n_best_images+1):-1]
+        camera1_cnrs = [x for i,x in enumerate(camera1_cnrs) if i in sindx]
+        camera2_cnrs = [x for i,x in enumerate(camera2_cnrs) if i in sindx]
+        world_cnrs = [x for i,x in enumerate(world_cnrs) if i in sindx]
 
-        print("Running extrinsic calibration...")
-        print("Detecting chessboard corners from Camera 1...")
-        all_pts_c1,_,all_ids_c1,used_c1 = self.detect_charuco_corners(include=include,exclude=exclude)
-
-        frames = frames_gen.raw_frame_generator_int8(frames_c2)
-
-        print("Detecting chessboard corners from Camera 2...")
-        all_pts_c2,_,all_ids_c2,used_c2 = self.detect_charuco_corners(include=include,exclude=exclude)          
-
-
-        all_pts_c1 = {i: all_pts_c1[i] for i in all_ids_c1[0].flatten()}
-        all_pts_c2 = {i: all_pts_c2[i] for i in all_ids_c2[0].flatten()}
-
-        """
-        Now we have all the detections done, we need to whittle down to correspondences.
-            - Find the intersection of used frames
-            - For each used frame find the intersection of detected points.
-                - The indices that show up here are ones we can add to a list for both cameras that will hold the point pairs
-
-            - The problem is that used_both gives an index error - lists are the wrong idea here
-        """
-
-        used_c1 = set(used_c1)
-        used_c2 = set(used_c2)
-
-        used_both = used_c1.intersection(used_c2)
-
-        for indx in used_both:
-            c1_pts = all_pts_c1[indx]
-            c2_pts = all_pts_c2[indx]
-            ids_both = set(c1_pts.keys()).intersection(set(c2_pts.keys()))
-
-            cam_1_im_pts.append(
-                all_pts_c1[indx][ids_both]
-                )
-            
-            cam_2_im_pts.append(
-                all_pts_c2[indx][ids_both]
+        retval, cameraMatrix1, distCoeffs1, cameraMatrix2, distCoeffs2, R, T, E, F, rvecs, tvecs, perViewErrors = cv.stereoCalibrateExtended(
+            objectPoints=world_cnrs,
+            imagePoints1=camera1_cnrs,
+            imagePoints2=camera2_cnrs,
+            cameraMatrix1=camera1.intrinsics.cameraMatrix,
+            distCoeffs1=camera1.intrinsics.distCoeffs,
+            cameraMatrix2=camera2.intrinsics.cameraMatrix,
+            distCoeffs2=camera2.intrinsics.distCoeffs,
+            imageSize=self.frames.im_shape,
+            R=R,
+            T=T,
+            flags=flags
             )
 
-        retval, mask = cv.findEssentialMat(cam_1_im_pts,cam_2_im_pts,cameraMatrix1)
+        # Camera one is considered to lie at origin
+        self.extrinsics.retval = retval
+        self.extrinsics.cameraMatrix1 = cameraMatrix1
+        self.extrinsics.distCoeffs = distCoeffs1
+        self.extrinsics.R = np.eye(3)
+        self.extrinsics.T = np.zeros(3)
+        self.extrinsics.rvec = cv.Rodrigues(np.eye(3))[0]
+        self.extrinsics.E = E.T
+        self.extrinsics.F = F.T
+        self.extrinsics.rvecs = [-r for r in rvecs]
+        self.extrinsics.tvecs = [-t for t in tvecs]
+        self.extrinsics.perViewErrors = perViewErrors
 
-        # Decomposing returns possible values Rposs1, Rposs2, tposs
-        return cv.decomposeEssentialMat(retval)
+        # Camera 2 will save all transformations as relative to camera 1
+        camera2.extrinsics.retval = retval
+        camera2.extrinsics.cameraMatrix1 = cameraMatrix2
+        camera2.extrinsics.distCoeffs = distCoeffs2
+        # R is the transform from Stereo camera 1 (TOP) to Stereo camera 2 (EAST). It is a change from world to east cam local coordinates.
+        # The docs also say that it is Camera 1 position WRT Camera 2 - hence again, sounds like a change from world to local
+        # Note that as a homogeneous transform the translation and rotation should be same CS. So if the rotation takes EAST axes to TOP axes that means the translation must be using EAST COORDINATES too, that is, T is expressed in camera 2's frame.
+        camera2.extrinsics.R = R
+        camera2.extrinsics.rvec = cv.Rodrigues(R)[0] 
+        camera2.extrinsics.T = T
+        camera2.extrinsics.E = E
+        camera2.extrinsics.F = F
+        camera2.extrinsics.rvecs = rvecs
+        camera2.extrinsics.tvecs = tvecs
+        camera2.extrinsics.perViewErrors = perViewErrors
 
-    def visually_inspect(self,frame,obj_pts,rvec,tvec,cam_mat,dist,err,frame_num,rms_error):
-        # used is a vector that tells us whether any points at all were found and thus whether the ith image was used
-        # the jth element of per_view_errors corresponds to the used[j]th element of the frame_generator
-        im_pts = cv.projectPoints(obj_pts,rvec,tvec,cam_mat,dist)
+        camera1.is_calibrated_extrinsic = True
+        camera2.is_calibrated_extrinsic = True
 
-        framergb = cv.cvtColor(frame,cv.COLOR_GRAY2BGR)
+        # Delete any custom classes, otherwise pickle will fail on Camera object
+        del camera1.detector
+        del camera2.detector
+        del self.frames
+        del camera2.frames
 
-        cv.drawChessboardCorners(framergb,(10,10),im_pts[0],True)
-        cv.putText(framergb,f"Error: {err[0]:.1f}px",(10,30),cv.FONT_HERSHEY_COMPLEX,1,(0,0,255),1)
-        cv.putText(framergb,f"Frame: {frame_num}",(10,70),cv.FONT_HERSHEY_COMPLEX,1,(0,0,255),1)
-        cv.putText(framergb,f"RMS Error (all frames): {rms_error:.2f}",(10,110),cv.FONT_HERSHEY_COMPLEX,1,(0,0,255),1)
-        cv.imshow('Visual inspection of camera calibration',framergb)
-        cv.waitKey()
+        print(f"\nDone extrinsic calibration...\n\nRMS error: {retval}\n")
 
     def __repr__(self):
-        return f"RMS Error: {self.retval:.2f}px"
+        return self.intrinsics.__repr__() + '\n\n' + self.extrinsics.__repr__()
+
+    def add_detected_charuco_frame(self,frame_number,im_pts,world_pts,cnr_ids,cnr_thresh=20):
+        # Used to save data from an aruco detection on an image
+        
+        if im_pts is not None and len(im_pts) < cnr_thresh:
+            im_pts = None
+            world_pts = None
+            cnr_ids = None
+
+        self.aruco_frames[frame_number] = [im_pts,world_pts,cnr_ids]
+
+    def stack_charuco_frames(self,include=None,exclude=None):
+        # Used to turn detections into a form suitable for drawing, or matching points by excluding null detections
+        stripped_cnrs = []
+        stripped_world_cnrs = []
+        stripped_ids = []
+        for frame_number, (im_cnrs, world_cnrs,_ids) in self.aruco_frames.items():
+
+            if include is not None and not frame_number in include: continue
+            if exclude is not None and frame_number in exclude: continue 
+
+            if im_cnrs is not None and _ids is not None and len(im_cnrs) >= 4:
+                stripped_cnrs.append(im_cnrs)
+                stripped_world_cnrs.append(world_cnrs)
+                stripped_ids.append(_ids)
+
+        return (stripped_cnrs,stripped_world_cnrs, stripped_ids)
+
+    def match_detected_points(self, camera2):
+
+        """
+        Extrinsic calibration detected point matching
+        """
+
+        cam1_all_cnrs = []
+        cam2_all_cnrs = []
+        all_world_cnrs = []
+
+        for frame_num, (im_cnrs,world_cnrs,_ids) in self.aruco_frames.items():
+
+            if im_cnrs is None or _ids is None: continue
+
+            if camera2.has_data_for_frame_number(frame_num):
+
+                this_frame_cam1_cnrs = []
+                this_frame_cam2_cnrs = []
+                this_frame_cam1_ids = []
+                this_frame_cam2_ids = []
+                this_frame_world_cnrs = []
+
+                for i, camera1_id in enumerate(_ids):
+
+                    if camera2.has_id_for_frame_number(frame_num,camera1_id):
+                        camera2_cnrs, camera2_world_cnrs, cam2_id = camera2.get_cnrs_by_id_and_frame(frame_num,camera1_id)
+                        camera1_cnrs = im_cnrs[i]
+
+                        this_frame_cam1_cnrs.append(camera1_cnrs)
+                        this_frame_cam1_ids.append(camera1_id)
+                        this_frame_cam2_ids.append(cam2_id)
+                        this_frame_cam2_cnrs.append(camera2_cnrs)
+                        this_frame_world_cnrs.append(world_cnrs[i])
+
+                if len(this_frame_cam1_cnrs) >= 4:
+                    this_frame_cam1_cnrs = np.vstack(this_frame_cam1_cnrs).reshape(-1,1,2)
+                    this_frame_cam2_cnrs = np.vstack(this_frame_cam2_cnrs).reshape(-1,1,2)
+                    this_frame_world_cnrs = np.vstack(this_frame_world_cnrs).reshape(-1,1,3)
+                    this_frame_cam1_ids = np.vstack(this_frame_cam1_ids)
+                    this_frame_cam2_ids = np.vstack(this_frame_cam2_ids)
+                    cam1_all_cnrs.append(this_frame_cam1_cnrs)
+                    cam2_all_cnrs.append(this_frame_cam2_cnrs)
+                    all_world_cnrs.append(this_frame_world_cnrs)
+
+                    # if len(this_frame_cam2_cnrs) > 4:
+                    #     self.show_frame(frame_num=frame_num,cnrs=this_frame_cam1_cnrs,ids=this_frame_cam1_ids,winname='cam1')
+                    #     camera2.show_frame(frame_num=frame_num,cnrs=this_frame_cam2_cnrs,ids=this_frame_cam2_ids,winname='cam2')
+                    #     cv.waitKey()
+
+        return (cam1_all_cnrs,cam2_all_cnrs,all_world_cnrs)
+
+    def has_data_for_frame_number(self,frame_number):
+        return True if self.aruco_frames[frame_number][0] is not None else False
+
+    def has_id_for_frame_number(self,frame_number,_id):
+        return True if _id in self.aruco_frames[frame_number][2] else False
+
+    def get_cnrs_by_id_and_frame(self,frame_number,_id):
+        for i, __id in enumerate(self.aruco_frames[frame_number][2]):
+            if __id == _id:
+                cnrs = self.aruco_frames[frame_number][0][i]
+                world_cnrs = self.aruco_frames[frame_number][1][i]
+                return cnrs, world_cnrs, __id
+
+    def show_frame(self,frame_num,delay=0,cnrs=None,ids=None,winname='Frame'):
+        frame = self.frames.get_frame(frame_num)
+        frame = cv.cvtColor(frame,cv.COLOR_GRAY2BGR)
+
+        if cnrs is not None:
+            cv.aruco.drawDetectedCornersCharuco(frame,cnrs,ids,(0,0,255))
+
+        cv.putText(frame,f"Frame: {frame_num}",(10,30),cv.FONT_HERSHEY_SIMPLEX,1,(0,255,0))
+        cv.imshow(winname,frame)
+
+    def project(self):
+        cv.projectPoints()
+
+    def calc_sensor_size(self, x_res, y_res, px_size : np.array ):
+
+        """
+        x_res: x-axis pixel resolution of sensor
+        y_res: y-axis pixel resolution of sensor
+        px_size: Size (mm) of single pixel
+
+        Returns:
+            Size of sensor in same units as px_size
+        """
+        
+        assert self.is_calibrated_intrinsic
+
+        focal_len_x = x_res * px_size
+        focal_len_y = y_res * px_size
+
+        return np.array([focal_len_x, focal_len_y])
+
+    # def focal_length(self, x_res, y_res):
+        
+
+    @property
+    def R_as_quat(self):
+        
+        assert self.is_calibrated_extrinsic
+
+        return Rotation.from_matrix(self.extrinsics.R).as_quat(scalar_first=True)
