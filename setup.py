@@ -9,13 +9,8 @@ setup(
     packages=find_packages(),
     install_requires=[
         'numpy',
-        'hscimproc'
+        'hscimproc @ git+https://github.com/GerardArmstrong/hscimproc.git@main'
     ],
     optional_requires=['opencv-python'],
-    # entry_points={
-    #     'console_scripts': [
-    #         'mraw-extract = mraw_extract:main',
-    #     ],
-    # },
 author='Gerard Armstrong')
 
