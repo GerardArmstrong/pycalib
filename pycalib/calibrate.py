@@ -307,9 +307,6 @@ class Camera:
         cv.putText(frame,f"Frame: {frame_num}",(10,30),cv.FONT_HERSHEY_SIMPLEX,1,(0,255,0))
         cv.imshow(winname,frame)
 
-    def project(self):
-        cv.projectPoints()
-
     def calc_sensor_size(self, x_res, y_res, px_size : np.array ):
 
         """
@@ -327,9 +324,6 @@ class Camera:
         focal_len_y = y_res * px_size
 
         return np.array([focal_len_x, focal_len_y])
-
-    # def focal_length(self, x_res, y_res):
-        
 
     @property
     def R_as_quat(self):
