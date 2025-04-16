@@ -44,7 +44,7 @@ class Camera:
         self.name = name if type(name) is str else "Unknown Camera"
         self.px_size = px_size
 
-    def detect_charuco_corners(self,hflip=False,show_img=False):
+    def detect_charuco_corners(self,hflip=False,show_img=False, include=None, exclude=None, ignored_ch_ids=[]):
 
         detector = TusqCharucoDetector()
         self.detector = detector
@@ -67,6 +67,11 @@ class Camera:
             if ch_cnrs is None:
                 ch_cnr_points_world = None
             else:
+
+                not_ignored = [_id not in ignored_ch_ids for _id in ch_ids]
+                ch_ids = ch_ids[not_ignored]
+                ch_cnrs = ch_cnrs[not_ignored]
+
                 ch_cnr_points_world = detector.getBoard().getChessboardCorners()[ch_ids]
 
                 if show_img:
