@@ -150,7 +150,7 @@ class Camera:
             counter += 1
         return ret
 
-    def calibrate_extrinsic2(self, camera2):
+    def calibrate_extrinsic_with_solvepnp(self, camera2):
 
         camera1 = self
 
@@ -166,35 +166,57 @@ class Camera:
         camera2_cnrs = [x for i, x in enumerate(camera2_cnrs) if i in sindx]
         world_cnrs = [x for i, x in enumerate(world_cnrs) if i in sindx]
 
-        ret1, rvec1, tvec1 = cv.solvePnP(
-            objectPoints=world_cnrs,
-            imagePoints=camera1_cnrs,
+        ret1, rvecs1, tvecs1, reproj1 = cv.solvePnPGeneric(
+            objectPoints=world_cnrs[0],
+            imagePoints=camera1_cnrs[0],
             cameraMatrix=camera1.intrinsics.cameraMatrix,
-            distCoeffs=camera1.intrinsics.distCoeffs
+            distCoeffs=camera1.intrinsics.distCoeffs,
+            flags=cv.SOLVEPNP_IPPE
         )
 
-        ret2, rvec2, tvec2 = cv.solvePnP(
-            objectPoints=world_cnrs,
-            imagePoints=camera2_cnrs,
+        ret1, rvecs2, tvecs2, reproj2 = cv.solvePnPGeneric(
+            objectPoints=world_cnrs[0],
+            imagePoints=camera2_cnrs[0],
             cameraMatrix=camera2.intrinsics.cameraMatrix,
-            distCoeffs=camera2.intrinsics.distCoeffs
+            distCoeffs=camera2.intrinsics.distCoeffs,
+            flags=cv.SOLVEPNP_IPPE
         )
 
-        R1 = Rotation.from_rotvec(rvec1)
-        R2 = Rotation.from_rotvec(rvec2)
+        R1 = Rotation.from_rotvec(rvecs1[0].flatten())
+        R2 = Rotation.from_rotvec(rvecs2[1].flatten())
 
         M1 = np.zeros((4, 4))
         M2 = np.zeros((4, 4))
 
-        M1[:3, :3] = R1
-        M1[:3, 3] = tvec1
+        M1[:3, :3] = R1.as_matrix()
+        M1[:3, 3] = tvecs1[0].flatten()
         M1[3, 3] = 1
 
-        M2[:3, :3] = R2
-        M2[:3, 3] = tvec2
+        M2[:3, :3] = R2.as_matrix()
+        M2[:3, 3] = tvecs2[1].flatten()
         M2[3, 3] = 1
 
-        print(M2 @ np.linalg.inv(M1))
+        offset = M2 @ np.linalg.inv(M1)
+
+        R = Rotation.from_matrix(offset[:3, :3]).as_matrix()
+        t = offset[:3, 3]
+
+        camera1.is_calibrated_extrinsic = True
+        camera2.is_calibrated_intrinsic = True
+
+        camera1.extrinsics.R = np.eye(3)
+        camera1.extrinsics.T = np.array([0., 0., 0.])
+        camera1.extrinsics.rvec = cv.Rodrigues(np.eye(3))[0]
+        camera2.extrinsics.R = R
+        camera2.extrinsics.T = t
+        camera2.extrinsics.rvec = cv.Rodrigues(R)[0]
+
+        del camera1.detector
+        del camera2.detector
+        del camera1.frames
+        del camera2.frames
+
+        return R, t
 
     def calibrate_extrinsic(self, camera2, n_best_images=1, R=None, T=None, flags=0):
 
@@ -224,7 +246,7 @@ class Camera:
             imageSize=self.frames.im_shape,
             R=R,
             T=T,
-            flags=flags
+            flags=flags,
         )
 
         # Camera one is considered to lie at origin
