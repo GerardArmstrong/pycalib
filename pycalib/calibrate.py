@@ -3,6 +3,8 @@ import cv2 as cv
 import numpy as np
 from sys import stdout
 from scipy.spatial.transform import Rotation
+import json
+from types import SimpleNamespace
 
 
 class TusqCharucoBoard(cv.aruco.CharucoBoard):
@@ -11,7 +13,8 @@ class TusqCharucoBoard(cv.aruco.CharucoBoard):
 
         _dict = cv.aruco.getPredefinedDictionary(cv.aruco.DICT_4X4_50)
 
-        super().__init__((10, 10), 0.01915, 0.01915*0.6, _dict)
+        pattern_size = 0.02
+        super().__init__((10, 10), pattern_size, pattern_size*0.6, _dict)
 
 
 class TusqCharucoDetector(cv.aruco.CharucoDetector):
@@ -47,6 +50,20 @@ class Camera:
         self.intrinsics.cameraMatrix = cameraMatrix
         self.name = name if type(name) is str else "Unknown Camera"
         self.px_size = px_size
+
+    def save(self, path):
+        data = {'intrinsics': {}, 'extrinsics': {}}
+        data['extrinsics']['rvec'] = self.extrinsics.rvec.tolist()
+        data['extrinsics']['T'] = self.extrinsics.T.tolist()
+        data['intrinsics']['cameraMatrix'] = self.intrinsics.cameraMatrix.tolist()
+        data['intrinsics']['distCoeffs'] = self.intrinsics.distCoeffs.tolist()
+        data['is_calibrated_intrinsic'] = self.is_calibrated_intrinsic
+        data['is_calibrated_extrinsic'] = self.is_calibrated_extrinsic
+        data['name'] = self.name
+
+        jsondata = json.dumps(data)
+        with open(path, 'w') as f:
+            json.dump(jsondata, f)
 
     def detect_charuco_corners(self, hflip=False, show_img=False, include=None, exclude=None, ignored_ch_ids=[]):
 
