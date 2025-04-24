@@ -135,12 +135,12 @@ class Camera:
             flags=flags
         )
 
-        self.intrinsics.flags = flags
         self.intrinsics.cameraMatrix = cameraMatrix
         self.intrinsics.distCoeffs = distCoeffs
         self.intrinsics.rvecs = rvecs
         self.intrinsics.retval = retval
         self.intrinsics.tvecs = tvecs
+        self.intrinsics.flags = flags
         self.intrinsics.stdDeviationsIntrinsics = stdDeviationsIntrinsics
         self.intrinsics.stdDeviationsExtrinsics = stdDeviationsExtrinsics
         self.intrinsics.perViewErrors = perViewErrors
@@ -237,6 +237,77 @@ class Camera:
         del camera2.frames
 
         return R, t
+
+    def calibrate_extrinsic(self, camera2, n_best_images=1, R=None, T=None, flags=0):
+
+        camera1 = self
+
+        assert camera1.is_calibrated_intrinsic
+        assert camera2.is_calibrated_intrinsic
+
+        camera1_cnrs, camera2_cnrs, world_cnrs = camera1.match_detected_points(
+            camera2)
+
+        # only keep the biggest few
+        sindx = [len(x) for x in camera1_cnrs]
+        sindx = np.argsort(sindx)[-1:-(n_best_images+1):-1]
+        camera1_cnrs = [x for i, x in enumerate(camera1_cnrs) if i in sindx]
+        camera2_cnrs = [x for i, x in enumerate(camera2_cnrs) if i in sindx]
+        world_cnrs = [x for i, x in enumerate(world_cnrs) if i in sindx]
+
+        retval, cameraMatrix1, distCoeffs1, cameraMatrix2, distCoeffs2, R, T, E, F, rvecs, tvecs, perViewErrors = cv.stereoCalibrateExtended(
+            objectPoints=world_cnrs,
+            imagePoints1=camera1_cnrs,
+            imagePoints2=camera2_cnrs,
+            cameraMatrix1=camera1.intrinsics.cameraMatrix,
+            distCoeffs1=camera1.intrinsics.distCoeffs,
+            cameraMatrix2=camera2.intrinsics.cameraMatrix,
+            distCoeffs2=camera2.intrinsics.distCoeffs,
+            imageSize=self.frames.im_shape,
+            R=R,
+            T=T,
+            flags=flags,
+        )
+
+        # Camera one is considered to lie at origin
+        self.extrinsics.retval = retval
+        self.extrinsics.cameraMatrix1 = cameraMatrix1
+        self.extrinsics.distCoeffs = distCoeffs1
+        self.extrinsics.R = np.eye(3)
+        self.extrinsics.T = np.zeros(3)
+        self.extrinsics.rvec = cv.Rodrigues(np.eye(3))[0]
+        self.extrinsics.E = E.T
+        self.extrinsics.F = F.T
+        self.extrinsics.rvecs = [-r for r in rvecs]
+        self.extrinsics.tvecs = [-t for t in tvecs]
+        self.extrinsics.perViewErrors = perViewErrors
+
+        # Camera 2 will save all transformations as relative to camera 1
+        camera2.extrinsics.retval = retval
+        camera2.extrinsics.cameraMatrix1 = cameraMatrix2
+        camera2.extrinsics.distCoeffs = distCoeffs2
+        # R is the transform from Stereo camera 1 (TOP) to Stereo camera 2 (EAST). It is a change from world to east cam local coordinates.
+        # The docs also say that it is Camera 1 position WRT Camera 2 - hence again, sounds like a change from world to local
+        # Note that as a homogeneous transform the translation and rotation should be same CS. So if the rotation takes EAST axes to TOP axes that means the translation must be using EAST COORDINATES too, that is, T is expressed in camera 2's frame.
+        camera2.extrinsics.R = R
+        camera2.extrinsics.rvec = cv.Rodrigues(R)[0]
+        camera2.extrinsics.T = T
+        camera2.extrinsics.E = E
+        camera2.extrinsics.F = F
+        camera2.extrinsics.rvecs = rvecs
+        camera2.extrinsics.tvecs = tvecs
+        camera2.extrinsics.perViewErrors = perViewErrors
+
+        camera1.is_calibrated_extrinsic = True
+        camera2.is_calibrated_extrinsic = True
+
+        # Delete any custom classes, otherwise pickle will fail on Camera object
+        del camera1.detector
+        del camera2.detector
+        del self.frames
+        del camera2.frames
+
+        print(f"\nDone extrinsic calibration...\n\nRMS error: {retval}\n")
 
     def __repr__(self):
         return self.intrinsics.__repr__() + '\n\n' + self.extrinsics.__repr__()
